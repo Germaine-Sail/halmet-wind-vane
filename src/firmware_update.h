@@ -228,8 +228,9 @@ inline void add_firmware_update_handlers() {
   server->add_handler(page);
   server->add_handler(info);
   server->add_handler(flash);
-  server->add_handler(std::make_shared<HTTPRequestHandler>(
-      1 << HTTP_GET, "/api/log", logcap::handle_log_get));
+  auto log = std::make_shared<HTTPRequestHandler>(1 << HTTP_GET, "/api/log",
+                                                  logcap::handle_log_get);
+  server->add_handler(log);
 }
 
 }  // namespace halmet

@@ -37,6 +37,11 @@
 #include "help_note.h"                // read-only web-UI help cards
 #include "sin_cos_angle_transform.h"  // SinCosAngle
 #include "version.h"                  // FW_VERSION
+#include "mob_button.h"               // MOB loop on A3, lamp on GPIO16
+#include "nmea0183_tcp.h"             // $WIMWV on TCP 10110
+#include "seatalk.h"                  // SeaTalk 1 RX decode + TX
+#include "sensesp/ui/ui_controls.h"   // CheckboxConfig
+#include "wind_cal.h"                 // sin/cos auto-calibration
 
 using namespace sensesp;
 using namespace halmet;
@@ -92,6 +97,12 @@ static inline bool transducer_dead() {
 static uint8_t sid = 0;
 static uint32_t n2k_tx_ok = 0;
 static uint32_t n2k_tx_fail = 0;
+// No-bus back-off: after kN2kFailLimit failed sends in a row, stop queueing
+// and probe once every 5 s until a send gets through again.
+static constexpr uint32_t kN2kFailLimit = 20;
+static bool n2k_ok = true;
+static uint32_t n2k_fail_streak = 0;
+static uint32_t n2k_last_probe = 0;
 
 // Register a read-only help card in the web UI config page.
 static void add_help_card(const char* path, const char* title,
@@ -213,10 +224,9 @@ flash. No reflash, no reboot.</p>
 <td style=")HTML" HN_TD R"HTML(">0.5144 for the egg-cup ST60+ (about 1 kn/Hz);
 ~0.36 for the older square-cup. Trim against GPS SOG in calm air.</td></tr>
 <tr><td style=")HTML" HN_TD ";" HN_KEY R"HTML(">Channel centering</td>
-<td style=")HTML" HN_TD R"HTML(">Free-rotate the vane, watch the sin/cos volts on
-the serial console, and set each offset so the midpoint lands on Vmid
-(&asymp;4.0 V). <code>tools/ellipse_fit.py</code> derives all four numbers from a
-logged rotation.</td></tr>
+<td style=")HTML" HN_TD R"HTML(">Automatic. The board learns each channel's
+min and max as the vane turns and keeps them through reboots. Until then it
+assumes 1.5&ndash;6.5 V. Give the vane a few full turns after fitting.</td></tr>
 <tr><td style=")HTML" HN_TD ";" HN_KEY R"HTML(">Angle offset</td>
 <td style=")HTML" HN_TD R"HTML(">Rotates the whole scale so 0&deg; sits on the
 bow.</td></tr>
@@ -294,38 +304,17 @@ void setup() {
   ch_sin->connect_to(new LambdaConsumer<float>([](float v) { last_sin_v = v; }));
   ch_cos->connect_to(new LambdaConsumer<float>([](float v) { last_cos_v = v; }));
 
-  // Validity gate, per channel and BEFORE the centering: an implausible or
-  // missing reading becomes NaN here, and NaN is the one input SinCosAngle
-  // already handles completely — it clears its smoothing window and emits
-  // no-data, so both outputs see NaN and no garbage sample survives inside the
-  // average to blend into the first angles after the transducer comes back.
-  // Gating the emitted angle instead left the window full of centred 0 V
-  // samples, i.e. several cycles of a convincing wrong angle on every recovery.
-  auto* sin_gate = new LambdaTransform<float, float>(
-      [](float v) { return volts_plausible(v) ? v : NAN; });
-  auto* cos_gate = new LambdaTransform<float, float>(
-      [](float v) { return volts_plausible(v) ? v : NAN; });
-
-  // Per-channel centering: terminal volts → (V − Vmid)/amplitude. The offset
-  // (−Vmid·slope) sets the midpoint; atan2 is scale-invariant so the slope only
-  // matters for the NaN-guard magnitude. CALIBRATION PARAM: per-channel Vmid.
-  auto* sin_cal = new Linear(1.0f / 1.5f, -4.0f / 1.5f, "/wind/sin/cal");
-  auto* cos_cal = new Linear(1.0f / 1.5f, -4.0f / 1.5f, "/wind/cos/cal");
-  ConfigItem(sin_cal)
-      ->set_title("Angle · A1 sine — centering")
-      ->set_description(
-          "Maps terminal volts onto a unit sine. Slope = 1/amplitude, offset = "
-          "−Vmid/amplitude. Defaults are 1/1.5 and −4.0/1.5, i.e. Vmid 4.0 V "
-          "swinging ±1.5 V. Refine from a logged free rotation.")
-      ->set_sort_order(2002);
-  ConfigItem(cos_cal)
-      ->set_title("Angle · A2 cosine — centering")
-      ->set_description(
-          "Same mapping for the cosine channel. Slope = 1/amplitude, offset = "
-          "−Vmid/amplitude. Both channels share one Vmid on a healthy sensor.")
-      ->set_sort_order(2003);
-  ch_sin->connect_to(sin_gate)->connect_to(sin_cal);
-  ch_cos->connect_to(cos_gate)->connect_to(cos_cal);
+  // Auto-calibrated normalisation (wind_cal.h) replaces the fixed 2.0-7.0 V
+  // window and the hand-set centering. Learned spans persist in NVS. A NaN
+  // from here clears SinCosAngle's smoothing window and reports no-data.
+  windcal::load();
+  auto* sin_cal = new LambdaTransform<float, float>(
+      [](float v) { return windcal::normalise(0, v); });
+  auto* cos_cal = new LambdaTransform<float, float>(
+      [](float v) { return windcal::normalise(1, v); });
+  ch_sin->connect_to(sin_cal);
+  ch_cos->connect_to(cos_cal);
+  event_loop()->onRepeat(60000, []() { windcal::save(); });
 
   // atan2(sin, cos), with the smoothing done on the sin/cos vector inside the
   // transform — averaging the emitted angle instead would break at the ±π wrap
@@ -380,11 +369,7 @@ void setup() {
                         "the older square-cup. Calibrate against GPS SOG in "
                         "calm air.")
       ->set_sort_order(2201);
-  // Speed gate: no-data while the sin/cos rails say the transducer is dead
-  // (see transducer_dead()). The raw pulse rate stays on the 1 Hz report, so
-  // the bench PWM test still shows its Hz with nothing on A1/A2.
-  auto* aws_gate = new LambdaTransform<float, float>(
-      [](float mps) { return transducer_dead() ? NAN : mps; });
+  // Speed comes from the pulse rate alone: a bad angle never blanks it.
   // Sliding mean of the last 4 pulse rates (2 s). A 500 ms window counts whole
   // pulses, so a single reading moves in 2 Hz steps — about 2 kn of AWS
   // flicker at K ≈ 1 kn/Hz. Four windows cut the step to 0.5 Hz and still
@@ -392,7 +377,7 @@ void setup() {
   // running accumulator. SensESP's MovingAverage is one, and it divides by a
   // sample size the web UI can set to 0.
   auto* hz_mean = new LambdaTransform<float, float>([](float hz) {
-    static constexpr int kN = 4;
+    static constexpr int kN = 6;  // 3 s
     static float buf[kN];
     static int ptr = 0, filled = 0;
     buf[ptr] = hz;
@@ -402,16 +387,15 @@ void setup() {
     for (int i = 0; i < filled; i++) sum += buf[i];
     return sum / filled;
   });
-  tach->connect_to(freq)->connect_to(hz_mean)->connect_to(speed_cal)
-      ->connect_to(aws_gate);
+  tach->connect_to(freq)->connect_to(hz_mean)->connect_to(speed_cal);
   freq->connect_to(new LambdaConsumer<float>([](float v) { last_hz = v; }));
-  aws_gate->connect_to(
+  speed_cal->connect_to(
       new LambdaConsumer<float>([](float v) { last_aws_mps = v; }));
 
   // V2: SignalK apparent wind speed (m/s). No throttle needed — the 500 ms
   // counter window already limits this to ~2 Hz.
   auto* aws_meta = new SKMetadata("m/s", "Apparent Wind Speed", "", "AWS");
-  aws_gate->connect_to(new SKOutputFloat("environment.wind.speedApparent",
+  speed_cal->connect_to(new SKOutputFloat("environment.wind.speedApparent",
                                          "/wind/speed/sk", aws_meta));
 
   // ----- Bench test signal (jumper GPIO33 → D1 to verify counting) -----
@@ -460,12 +444,81 @@ void setup() {
                      : N2kDoubleNA;
     double aws = isfinite(last_aws_mps) ? last_aws_mps : N2kDoubleNA;
     SetN2kWindSpeed(msg, sid, aws, awa, N2kWind_Apparent);
+    if (!n2k_ok) {
+      if (millis() - n2k_last_probe < 5000) return;
+      n2k_last_probe = millis();
+    }
     if (nmea2000->SendMsg(msg)) {
       n2k_tx_ok++;
+      n2k_fail_streak = 0;
+      if (!n2k_ok) {
+        n2k_ok = true;
+        ESP_LOGI(kTag, "N2K bus back, resuming PGN 130306");
+      }
     } else {
       n2k_tx_fail++;
+      if (n2k_ok && ++n2k_fail_streak >= kN2kFailLimit) {
+        n2k_ok = false;
+        n2k_last_probe = millis();
+        ESP_LOGW(kTag, "no N2K bus, pausing PGN 130306 (retry every 5 s)");
+      }
     }
     sid = (sid >= 252) ? 0 : sid + 1;
+  });
+
+  // ----- SeaTalk 1: RX decode on D2, TX on GPIO17 -----
+  // Sending is off until switched on in the web UI. Wind is never sent while
+  // another wind instrument is talking on the bus.
+  static CheckboxConfig* st_send =
+      new CheckboxConfig(false, "Send wind and MOB on SeaTalk", "/seatalk/send");
+  ConfigItem(st_send)
+      ->set_title("SeaTalk · send")
+      ->set_description("Transmit apparent wind (and MOB) on SeaTalk 1 via "
+                        "GPIO17. Wind is held back while another wind "
+                        "instrument is heard on the bus.")
+      ->set_sort_order(2300);
+  seatalk::begin();
+  event_loop()->onRepeat(1, []() { seatalk::poll(); });
+  event_loop()->onRepeat(500, []() {
+    if (!st_send->get_value() || seatalk::foreign_wind_recent()) return;
+    seatalk::send_awa(last_awa_rad);
+    seatalk::send_aws(last_aws_mps);
+  });
+
+  // ----- MOB button: supervised loop on A3, lamp on GPIO16 -----
+  // On trigger, send the SeaTalk MOB datagram three times, 300 ms apart.
+  mob::setup(ads, []() {
+    if (!st_send->get_value()) return;
+    for (int i = 0; i < 3; i++) {
+      event_loop()->onDelay(i * 300, []() { seatalk::send_mob(); });
+    }
+  });
+
+  // ----- NMEA 0183 over TCP -----
+  event_loop()->onRepeat(100, []() { nmea0183::poll(); });
+  event_loop()->onRepeat(500, []() {
+    nmea0183::send_mwv(last_awa_rad, last_aws_mps);
+  });
+
+  event_loop()->onRepeat(1000, []() {
+    ESP_LOGI(kTag,
+             "seatalk rx=%luB/%lu dgrams (%s) framing=%lu foreign_wind=%lu "
+             "tx ok=%lu unverified=%lu collisions=%lu dropped=%lu [send %s] "
+             "0183 tcp_clients=%d sent=%lu",
+             (unsigned long)seatalk::stats.bytes,
+             (unsigned long)seatalk::stats.datagrams,
+             seatalk::invert ? "inverted" : "direct",
+             (unsigned long)seatalk::stats.framing,
+             (unsigned long)seatalk::stats.foreign_wind,
+             (unsigned long)seatalk::stats.tx_ok,
+             (unsigned long)seatalk::stats.unverified,
+             (unsigned long)seatalk::stats.collisions,
+             (unsigned long)seatalk::stats.dropped,
+             st_send->get_value() ? "on" : "off", nmea0183::client_count(),
+             (unsigned long)nmea0183::sent);
+    ESP_LOGI(kTag, "mob %s button=%s (%.2f V) lamp=%s", mob::mob_state(),
+             mob::button_state(), mob::last_volts,
+             mob::lamp_on ? "on" : "off");
   });
 
   ESP_LOGI(kTag, "HALMET wind v%s (%s %s, slot %s) booted — angle + speed + N2K up",
@@ -478,13 +531,13 @@ void setup() {
     float awa_deg =
         isfinite(last_awa_rad) ? last_awa_rad * 180.0f / (float)M_PI : NAN;
     ESP_LOGI(kTag,
-             "tick %lu  sin=%.3fV cos=%.3fV [%s]  AWA=%.4f rad (%.1f deg)  "
-             "pulse=%.1f Hz  AWS=%.2f m/s  n2k_tx=%lu fail=%lu  "
+             "tick %lu  sin=%.3fV cos=%.3fV [cal %s]  AWA=%.4f rad (%.1f deg)  "
+             "pulse=%.1f Hz  AWS=%.2f m/s  n2k=%s tx=%lu  "
              "gps_time=%s age=%ds ntp_served=%lu",
              (unsigned long)beat++, last_sin_v, last_cos_v,
-             angle_volts_ok() ? "ok" : "OUT OF RANGE", last_awa_rad, awa_deg,
-             last_hz, last_aws_mps, (unsigned long)n2k_tx_ok,
-             (unsigned long)n2k_tx_fail,
+             windcal::both_learned() ? "learned" : "default", last_awa_rad,
+             awa_deg, last_hz, last_aws_mps, n2k_ok ? "ok" : "no-bus",
+             (unsigned long)n2k_tx_ok,
              GpsTimeServer::instance().locked() ? "locked" : "none",
              GpsTimeServer::instance().age_s(),
              (unsigned long)GpsTimeServer::instance().served());

@@ -71,7 +71,7 @@ code{background:#eee;padding:.1em .3em;border-radius:3px}ol{padding-left:1.3em}l
 <p id="s"></p>
 <script>
 const $=id=>document.getElementById(id);
-const REPO='den200/halmet-wind-vane';
+const REPO='Germaine-Sail/halmet-wind-vane';
 let running='';
 function info(){return fetch('/api/firmware',{cache:'no-store'}).then(r=>r.json());}
 info().then(j=>{running=j.version;$('v').textContent='v'+j.version;$('b').textContent='built '+j.built+', slot '+j.slot;}).catch(()=>{});

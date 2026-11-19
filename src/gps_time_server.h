@@ -90,8 +90,17 @@ class GpsTimeServer {
       return;
     }
 
-    // Commit only when this message agrees with the previous candidate,
-    // carried forward by the local clock.
+    char from[24];
+    snprintf(from, sizeof(from), "N2K source %u", msg.Source);
+    offer_utc(utc_us, rx_us, from);
+  }
+
+ public:
+  // A UTC time from any GNSS feed (N2K PGN 126992, NMEA 0183 RMC/ZDA), with
+  // the local esp_timer time it arrived. Commits only when it agrees with the
+  // previous offer, carried forward by the local clock.
+  void offer_utc(int64_t utc_us, int64_t rx_us, const char* from) {
+    if (utc_us / 1000000 < kMinValidUnix) return;
     const bool agrees =
         cand_valid_ &&
         llabs((cand_utc_us_ + (rx_us - cand_rx_us_)) - utc_us) < kAgreeUs;
@@ -101,14 +110,15 @@ class GpsTimeServer {
     if (!agrees) return;
 
     if (!have_time_) {
-      ESP_LOGI(kTag, "GPS time locked from N2K source %u: %lld (unix s)",
-               msg.Source, (long long)(utc_us / 1000000));
+      ESP_LOGI(kTag, "GPS time locked from %s: %lld (unix s)", from,
+               (long long)(utc_us / 1000000));
     }
     lock_utc_us_ = utc_us;
     lock_rx_us_ = rx_us;
     have_time_ = true;
   }
 
+ private:
   void log_reject(unsigned char source, const char* why, int value) {
     // Once a minute at most; the GNSS repeats every second.
     const int64_t now = esp_timer_get_time();

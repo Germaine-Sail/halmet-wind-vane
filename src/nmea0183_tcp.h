@@ -1,7 +1,8 @@
 #pragma once
 
-// NMEA 0183 over TCP: $WIMWV apparent wind on port 10110 (the usual NMEA
-// port), for plotters and apps on the boat Wi-Fi. Up to four clients.
+// NMEA 0183 over TCP on port 10110 (the usual NMEA port), for plotters and
+// apps on the boat Wi-Fi: our $WIMWV apparent wind plus every valid sentence
+// received on D2. Up to four clients.
 
 #include <Arduino.h>
 #include <WiFi.h>
@@ -14,7 +15,8 @@ static constexpr uint16_t kPort = 10110;
 static constexpr int kMaxClients = 4;
 static WiFiServer* server = nullptr;
 static WiFiClient clients[kMaxClients];
-static uint32_t sent = 0;
+static uint32_t sent = 0;       // our own sentences sent
+static uint32_t forwarded = 0;  // sentences passed on from the D2 input
 
 inline int client_count() {
   int n = 0;
@@ -44,19 +46,30 @@ inline void poll() {
   incoming.stop();  // all slots busy
 }
 
+inline bool write_all(const char* text) {
+  bool any = false;
+  for (auto& c : clients) {
+    if (c.connected()) {
+      c.print(text);
+      any = true;
+    }
+  }
+  return any;
+}
+
+// Pass on a complete sentence received from elsewhere ("$...*hh").
+inline void forward(const char* sentence) {
+  char out[112];
+  snprintf(out, sizeof(out), "%s\r\n", sentence);
+  if (write_all(out)) forwarded++;
+}
+
 inline void send_line(const char* body) {
   uint8_t cs = 0;
   for (const char* p = body; *p; p++) cs ^= (uint8_t)*p;
   char line[96];
   snprintf(line, sizeof(line), "$%s*%02X\r\n", body, cs);
-  bool any = false;
-  for (auto& c : clients) {
-    if (c.connected()) {
-      c.print(line);
-      any = true;
-    }
-  }
-  if (any) sent++;
+  if (write_all(line)) sent++;
 }
 
 // $WIMWV,<angle 0-359.9>,R,<speed>,N,<A|V>

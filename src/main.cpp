@@ -39,8 +39,7 @@
 #include "version.h"                  // FW_VERSION
 #include "mob_button.h"               // MOB loop on A3, lamp on GPIO16
 #include "nmea0183_tcp.h"             // $WIMWV on TCP 10110
-#include "seatalk.h"                  // SeaTalk 1 RX decode + TX
-#include "sensesp/ui/ui_controls.h"   // CheckboxConfig
+#include "nmea0183_rx.h"              // NMEA 0183 in on D2
 #include "wind_cal.h"                 // sin/cos auto-calibration
 
 using namespace sensesp;
@@ -466,35 +465,13 @@ void setup() {
     sid = (sid >= 252) ? 0 : sid + 1;
   });
 
-  // ----- SeaTalk 1: RX decode on D2, TX on GPIO17 -----
-  // Sending is off until switched on in the web UI. Wind is never sent while
-  // another wind instrument is talking on the bus.
-  static CheckboxConfig* st_send =
-      new CheckboxConfig(false, "Send wind and MOB on SeaTalk", "/seatalk/send");
-  ConfigItem(st_send)
-      ->set_title("SeaTalk · send")
-      ->set_description("Transmit apparent wind (and MOB) on SeaTalk 1 via "
-                        "GPIO17. Wind is held back while another wind "
-                        "instrument is heard on the bus.")
-      ->set_sort_order(2300);
-  seatalk::begin();
-  event_loop()->onRepeat(1, []() { seatalk::poll(); });
-  event_loop()->onRepeat(500, []() {
-    if (!st_send->get_value() || seatalk::foreign_wind_recent()) return;
-    seatalk::send_awa(last_awa_rad);
-    seatalk::send_aws(last_aws_mps);
-  });
-
   // ----- MOB button: supervised loop on A3, lamp on GPIO16 -----
-  // On trigger, send the SeaTalk MOB datagram three times, 300 ms apart.
-  mob::setup(ads, []() {
-    if (!st_send->get_value()) return;
-    for (int i = 0; i < 3; i++) {
-      event_loop()->onDelay(i * 300, []() { seatalk::send_mob(); });
-    }
-  });
+  // MOB raises the SignalK notification (see mob_button.h); nothing extra.
+  mob::setup(ads, nullptr);
 
-  // ----- NMEA 0183 over TCP -----
+  // ----- NMEA 0183: in on D2, out over TCP 10110 -----
+  nmea0183rx::begin();
+  event_loop()->onRepeat(10, []() { nmea0183rx::poll(); });
   event_loop()->onRepeat(100, []() { nmea0183::poll(); });
   event_loop()->onRepeat(500, []() {
     nmea0183::send_mwv(last_awa_rad, last_aws_mps);
@@ -502,20 +479,15 @@ void setup() {
 
   event_loop()->onRepeat(1000, []() {
     ESP_LOGI(kTag,
-             "seatalk rx=%luB/%lu dgrams (%s) framing=%lu foreign_wind=%lu "
-             "tx ok=%lu unverified=%lu collisions=%lu dropped=%lu [send %s] "
-             "0183 tcp_clients=%d sent=%lu",
-             (unsigned long)seatalk::stats.bytes,
-             (unsigned long)seatalk::stats.datagrams,
-             seatalk::invert ? "inverted" : "direct",
-             (unsigned long)seatalk::stats.framing,
-             (unsigned long)seatalk::stats.foreign_wind,
-             (unsigned long)seatalk::stats.tx_ok,
-             (unsigned long)seatalk::stats.unverified,
-             (unsigned long)seatalk::stats.collisions,
-             (unsigned long)seatalk::stats.dropped,
-             st_send->get_value() ? "on" : "off", nmea0183::client_count(),
-             (unsigned long)nmea0183::sent);
+             "0183 in=%luB/%lu sentences (%s) bad_cs=%lu time=%lu  "
+             "tcp_clients=%d sent=%lu forwarded=%lu",
+             (unsigned long)nmea0183rx::stats.bytes,
+             (unsigned long)nmea0183rx::stats.sentences,
+             nmea0183rx::mode_name(),
+             (unsigned long)nmea0183rx::stats.bad_checksum,
+             (unsigned long)nmea0183rx::stats.time_fixes,
+             nmea0183::client_count(), (unsigned long)nmea0183::sent,
+             (unsigned long)nmea0183::forwarded);
     ESP_LOGI(kTag, "mob %s button=%s (%.2f V) lamp=%s", mob::mob_state(),
              mob::button_state(), mob::last_volts,
              mob::lamp_on ? "on" : "off");

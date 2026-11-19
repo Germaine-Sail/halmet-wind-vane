@@ -1,7 +1,7 @@
 #pragma once
 
 // Keeps the serial log in RAM so it can be downloaded from the web UI
-// (/api/log, linked from the /update page) without a USB cable: the first
+// (/api/halmet-log, linked from the /update page) without a USB cable: the first
 // 12 KB after boot are kept for good (start-up and early diagnostics), and
 // the most recent 24 KB roll. Everything still goes to the serial port.
 
@@ -65,7 +65,7 @@ inline void begin() {
   prev_vprintf = esp_log_set_vprintf(capture_vprintf);
 }
 
-// GET /api/log: the captured log as a text file, oldest line first.
+// GET /api/halmet-log: the captured log as a text file, oldest line first.
 static esp_err_t handle_log_get(httpd_req_t* req) {
   httpd_resp_set_type(req, "text/plain; charset=utf-8");
   httpd_resp_set_hdr(req, "Content-Disposition",

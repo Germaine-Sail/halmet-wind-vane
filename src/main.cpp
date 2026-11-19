@@ -255,7 +255,7 @@ update — they live in a separate flash partition.</li>
 
 void setup() {
   SetupLogging();
-  logcap::begin();  // RAM copy of the log for /api/log
+  logcap::begin();  // RAM copy of the log for /api/halmet-log
 
   // Hostname doubles as the WiFi AP SSID and mDNS name (halmet-wind.local).
   SensESPAppBuilder builder;

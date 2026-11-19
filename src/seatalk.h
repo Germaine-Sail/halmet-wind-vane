@@ -175,13 +175,34 @@ inline void take_sample() {
   }
 }
 
+// Widths above are by physical pin level (L = pin low), not decoder level.
+// Raw edge dump: the first kRawEdges pin changes after boot, as
+// "<level that ended><duration us>" pairs, to see the waveform itself.
+static constexpr int kRawEdges = 240;
+static char raw_line[160];
+static int raw_count = 0, raw_len = 0;
+static uint8_t prev_pin = 1;
+
+inline void raw_edge(uint32_t w, uint8_t ended_level) {
+  if (raw_count >= kRawEdges) return;
+  raw_len += snprintf(raw_line + raw_len, sizeof(raw_line) - raw_len, "%c%lu ",
+                      ended_level ? 'H' : 'L', (unsigned long)w);
+  raw_count++;
+  if (raw_len > 130 || raw_count == kRawEdges) {
+    ESP_LOGI(kStTag, "raw pin: %s", raw_line);
+    raw_len = 0;
+  }
+}
+
 inline void feed_edge(uint32_t t, uint8_t pin_level) {
   const uint8_t l = pin_level ^ (invert ? 1 : 0);
   if (last_edge_us != 0) {
-    const uint32_t w = t - last_edge_us;  // how long `level` lasted
+    const uint32_t w = t - last_edge_us;  // how long prev_pin lasted
+    // Raw dump starts at the first short pulse; long gaps inside it are kept.
+    if (w < 20000 || raw_count > 0) raw_edge(w, prev_pin);
     int n = (int)(w / kBitUs + 0.5f);
     if (n > 11) n = 11;
-    if (level == 0) {
+    if (prev_pin == 0) {
       widths.low[n]++;
       if (w < widths.min_low_us) widths.min_low_us = w;
     } else if (n < 11) {  // long highs are just idle gaps
@@ -189,6 +210,7 @@ inline void feed_edge(uint32_t t, uint8_t pin_level) {
       if (w < widths.min_high_us) widths.min_high_us = w;
     }
   }
+  prev_pin = pin_level;
   last_edge_us = t;
   while (in_char && (int32_t)(t - sample_time(bit_k)) > 0) take_sample();
   level = l;

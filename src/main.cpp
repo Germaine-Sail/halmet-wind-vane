@@ -255,11 +255,13 @@ update — they live in a separate flash partition.</li>
 
 void setup() {
   SetupLogging();
-  logcap::begin();  // RAM copy of the log for /api/halmet-log
 
   // Hostname doubles as the WiFi AP SSID and mDNS name (halmet-wind.local).
   SensESPAppBuilder builder;
   sensesp_app = builder.set_hostname("halmet-wind")->get_app();
+  // After the app exists: SensESP installs its own log hook (which writes the
+  // console itself and does not chain on), so ours has to sit in front of it.
+  logcap::begin();  // RAM copy of the log for /api/halmet-log
 
   // Wiring/power/calibration help, shown as read-only cards in the web UI.
   add_help_cards();

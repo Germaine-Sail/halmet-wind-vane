@@ -31,7 +31,8 @@ static int capture_vprintf(const char* fmt, va_list args) {
   va_copy(copy, args);
   // Never block a logging task for long: if the ring is busy (e.g. a
   // download in progress), this line just goes to serial only.
-  if (ring && lock && xSemaphoreTake(lock, pdMS_TO_TICKS(5)) == pdTRUE) {
+  if (ring && lock && !xPortInIsrContext() &&
+      xSemaphoreTake(lock, pdMS_TO_TICKS(5)) == pdTRUE) {
     int n = vsnprintf(line_buf, sizeof(line_buf), fmt, copy);
     if (n > 0) {
       if ((size_t)n >= sizeof(line_buf)) n = sizeof(line_buf) - 1;
@@ -51,7 +52,9 @@ static int capture_vprintf(const char* fmt, va_list args) {
   return prev_vprintf ? prev_vprintf(fmt, args) : vprintf(fmt, args);
 }
 
-// Call as early as possible in setup(), right after SetupLogging().
+// Call right after the SensESP app is built: SensESP's own log hook goes in
+// during startup and does not chain to whatever was installed before it, so
+// this hook must be installed after it and forward to it.
 inline void begin() {
   boot = (char*)malloc(kBootSize);
   ring = (char*)malloc(kRingSize);

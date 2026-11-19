@@ -1,8 +1,9 @@
 #pragma once
 
-// Keeps the most recent ~32 KB of the serial log in RAM so it can be
-// downloaded from the web UI (/api/log, linked from the /update page) without
-// a USB cable. Everything still goes to the serial port as before.
+// Keeps the serial log in RAM so it can be downloaded from the web UI
+// (/api/log, linked from the /update page) without a USB cable: the first
+// 12 KB after boot are kept for good (start-up and early diagnostics), and
+// the most recent 24 KB roll. Everything still goes to the serial port.
 
 #include <Arduino.h>
 #include <esp_http_server.h>
@@ -14,7 +15,10 @@
 
 namespace logcap {
 
-static constexpr size_t kRingSize = 32 * 1024;
+static constexpr size_t kBootSize = 12 * 1024;
+static constexpr size_t kRingSize = 24 * 1024;
+static char* boot = nullptr;
+static size_t boot_len = 0;
 static char* ring = nullptr;
 static size_t head = 0;      // next write position
 static bool wrapped = false;
@@ -31,7 +35,9 @@ static int capture_vprintf(const char* fmt, va_list args) {
     int n = vsnprintf(line_buf, sizeof(line_buf), fmt, copy);
     if (n > 0) {
       if ((size_t)n >= sizeof(line_buf)) n = sizeof(line_buf) - 1;
-      for (int i = 0; i < n; i++) {
+      int i = 0;
+      while (i < n && boot_len < kBootSize) boot[boot_len++] = line_buf[i++];
+      for (; i < n; i++) {
         ring[head++] = line_buf[i];
         if (head == kRingSize) {
           head = 0;
@@ -47,9 +53,15 @@ static int capture_vprintf(const char* fmt, va_list args) {
 
 // Call as early as possible in setup(), right after SetupLogging().
 inline void begin() {
+  boot = (char*)malloc(kBootSize);
   ring = (char*)malloc(kRingSize);
   lock = xSemaphoreCreateMutex();
-  if (!ring || !lock) return;
+  if (!boot || !ring || !lock) {
+    free(boot);
+    free(ring);
+    boot = ring = nullptr;
+    return;
+  }
   prev_vprintf = esp_log_set_vprintf(capture_vprintf);
 }
 
@@ -65,6 +77,10 @@ static esp_err_t handle_log_get(httpd_req_t* req) {
   }
   // Sent straight from the ring while holding the lock, so no 32 KB copy is
   // needed; lines logged meanwhile go to serial only (see capture_vprintf).
+  httpd_resp_send_chunk(req, boot, boot_len);
+  if (wrapped) {
+    httpd_resp_sendstr_chunk(req, "\n----- (earlier lines dropped) -----\n");
+  }
   if (wrapped) httpd_resp_send_chunk(req, ring + head, kRingSize - head);
   httpd_resp_send_chunk(req, ring, head);
   xSemaphoreGive(lock);

@@ -239,7 +239,8 @@ inline void poll() {
 }
 
 inline void log_widths() {
-  if (millis() - boot_ms > kDiagMs) return;
+  // First 2 min after boot, and for as long as nothing has decoded.
+  if (millis() - boot_ms > kDiagMs && stats.datagrams > 0) return;
   char lo[96], hi[96];
   int a = 0, b = 0;
   for (int i = 0; i < 12; i++) {

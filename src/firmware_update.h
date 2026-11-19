@@ -29,6 +29,8 @@
 #include <esp_log.h>
 #include <esp_ota_ops.h>
 
+#include "log_capture.h"
+
 #include <algorithm>
 #include <memory>
 
@@ -61,6 +63,7 @@ code{background:#eee;padding:.1em .3em;border-radius:3px}ol{padding-left:1.3em}l
 <h2>HALMET Wind — firmware update</h2>
 <p>Running <b id="v">…</b> <span class="m" id="b"></span></p>
 <p><button id="chk">Check latest release</button> <span id="rel"></span></p>
+<p><a href="/api/log" download="halmet-wind-log.txt"><button type="button">Download log</button></a> <span class="m">last ~32 KB of the serial log</span></p>
 <ol class="m">
 <li>Download the <code>.bin</code> from the release. If the boat Wi-Fi has no internet, do it on mobile data first — it lands in Files.</li>
 <li>Back on the boat Wi-Fi, pick that file below and press Flash. The board reboots by itself when done; wind data pauses for about ten seconds.</li>
@@ -225,6 +228,8 @@ inline void add_firmware_update_handlers() {
   server->add_handler(page);
   server->add_handler(info);
   server->add_handler(flash);
+  server->add_handler(std::make_shared<HTTPRequestHandler>(
+      1 << HTTP_GET, "/api/log", logcap::handle_log_get));
 }
 
 }  // namespace halmet

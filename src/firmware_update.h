@@ -27,6 +27,9 @@
 #include <esp_app_format.h>
 #include <esp_http_server.h>
 #include <esp_log.h>
+#include <esp_crt_bundle.h>
+#include <esp_http_client.h>
+#include <esp_https_ota.h>
 #include <esp_ota_ops.h>
 
 #include "log_capture.h"
@@ -63,6 +66,7 @@ code{background:#eee;padding:.1em .3em;border-radius:3px}ol{padding-left:1.3em}l
 <h2>HALMET Wind — firmware update</h2>
 <p>Running <b id="v">…</b> <span class="m" id="b"></span></p>
 <p><button id="chk">Check latest release</button> <span id="rel"></span></p>
+<p><button id="gh">Install latest from GitHub</button> <span id="ghs" class="m">the board downloads it itself; needs internet on the boat Wi-Fi</span></p>
 <p><a href="/api/halmet-log" download="halmet-wind-log.txt"><button type="button">Download log</button></a> <span class="m">start-up plus the latest lines</span></p>
 <ol class="m">
 <li>Download the <code>.bin</code> from the release. If the boat Wi-Fi has no internet, do it on mobile data first — it lands in Files.</li>
@@ -88,6 +92,21 @@ $('chk').onclick=()=>{
     bins.forEach(a=>{html+=' · <a href="'+a.browser_download_url+'">'+a.name+'</a>';});
     $('rel').innerHTML=html;
   }).catch(()=>{$('rel').innerHTML='<span class="err">GitHub not reachable from this network — download on mobile data, then come back.</span>';});
+};
+$('gh').onclick=()=>{
+  if(!confirm('Download and install the latest release from GitHub?'))return;
+  $('gh').disabled=true;$('go').disabled=true;
+  fetch('/api/firmware/github',{method:'POST'}).then(()=>{
+    const st=()=>fetch('/api/firmware/github',{cache:'no-store'}).then(r=>r.json()).then(j=>{
+      $('ghs').textContent=j.status;
+      if(j.busy){setTimeout(st,1500);return;}
+      if(j.status.startsWith('installed')){
+        let tries=0;const back=()=>info().then(k=>{if(k.version!==running||tries>6){$('ghs').innerHTML='<span class="ok">Running v'+k.version+'</span>';setTimeout(()=>location.reload(),1500);}else{tries++;setTimeout(back,2000);}}).catch(()=>{tries++;setTimeout(back,2000);});
+        setTimeout(back,4000);
+      }else{$('gh').disabled=false;}
+    }).catch(()=>setTimeout(st,2000));
+    st();
+  });
 };
 $('f').onchange=()=>{$('go').disabled=!$('f').files.length;$('s').textContent='';};
 $('go').onclick=()=>{
@@ -207,6 +226,113 @@ static esp_err_t handle_firmware_get(httpd_req_t* req) {
   return ESP_OK;
 }
 
+// ---- Install latest release straight from GitHub (board downloads it) ----
+#define HALMET_GH_REPO "Germaine-Sail/halmet-wind-vane"
+static volatile bool gh_busy = false;
+static char gh_status[120] = "idle";
+
+static void gh_set(const char* fmt, const char* a = "") {
+  snprintf(gh_status, sizeof(gh_status), fmt, a);
+  ESP_LOGI(kUpdTag, "github: %s", gh_status);
+}
+
+// tag_name of the latest release, e.g. "v1.3.7".
+static bool gh_latest_tag(char* tag, size_t n) {
+  esp_http_client_config_t c = {};
+  c.url = "https://api.github.com/repos/" HALMET_GH_REPO "/releases/latest";
+  c.crt_bundle_attach = esp_crt_bundle_attach;
+  c.user_agent = "halmet-wind";
+  c.buffer_size = 2048;
+  c.timeout_ms = 15000;
+  esp_http_client_handle_t h = esp_http_client_init(&c);
+  if (!h) return false;
+  esp_http_client_set_header(h, "Accept", "application/vnd.github+json");
+  bool ok = false;
+  static char body[4096];  // tag_name sits near the top of the JSON
+  if (esp_http_client_open(h, 0) == ESP_OK) {
+    esp_http_client_fetch_headers(h);
+    const int code = esp_http_client_get_status_code(h);
+    int len = esp_http_client_read_response(h, body, sizeof(body) - 1);
+    body[len > 0 ? len : 0] = 0;
+    const char* p = code == 200 ? strstr(body, "\"tag_name\":\"") : nullptr;
+    if (p) {
+      p += 12;
+      const char* e = strchr(p, '"');
+      if (e && (size_t)(e - p) < n) {
+        memcpy(tag, p, e - p);
+        tag[e - p] = 0;
+        ok = true;
+      }
+    }
+  }
+  esp_http_client_close(h);
+  esp_http_client_cleanup(h);
+  return ok;
+}
+
+static void gh_task(void*) {
+  char tag[32];
+  gh_set("asking GitHub for the latest release…");
+  if (!gh_latest_tag(tag, sizeof(tag))) {
+    gh_set("failed: GitHub not reachable (does the boat Wi-Fi have internet?)");
+  } else if (strcmp(tag + (tag[0] == 'v' ? 1 : 0), FW_VERSION) == 0) {
+    gh_set("already running %s", tag);
+  } else {
+    static char url[200];
+    snprintf(url, sizeof(url),
+             "https://github.com/" HALMET_GH_REPO
+             "/releases/download/%s/halmet-wind-%s.bin",
+             tag, tag);
+    gh_set("downloading and writing %s… (about a minute)", tag);
+    esp_http_client_config_t c = {};
+    c.url = url;
+    c.crt_bundle_attach = esp_crt_bundle_attach;
+    c.user_agent = "halmet-wind";
+    c.buffer_size = 4096;     // GitHub's redirect URL is long
+    c.buffer_size_tx = 2048;
+    c.timeout_ms = 30000;
+    c.keep_alive_enable = true;
+    esp_https_ota_config_t oc = {};
+    oc.http_config = &c;
+    const esp_err_t r = esp_https_ota(&oc);
+    if (r == ESP_OK) {
+      gh_set("installed %s, rebooting…", tag);
+      gh_busy = false;
+      vTaskDelay(pdMS_TO_TICKS(1500));
+      esp_restart();
+    }
+    char msg[80];
+    snprintf(msg, sizeof(msg), "failed: %s", esp_err_to_name(r));
+    gh_set("%s", msg);
+  }
+  gh_busy = false;
+  vTaskDelete(nullptr);
+}
+
+static esp_err_t handle_github_post(httpd_req_t* req) {
+  if (!gh_busy) {
+    gh_busy = true;
+    gh_set("starting…");
+    if (xTaskCreate(gh_task, "gh_ota", 8192, nullptr, 5, nullptr) != pdPASS) {
+      gh_busy = false;
+      gh_set("failed: could not start the download task");
+    }
+  }
+  httpd_resp_set_type(req, "text/plain");
+  httpd_resp_sendstr(req, "OK");
+  return ESP_OK;
+}
+
+static esp_err_t handle_github_get(httpd_req_t* req) {
+  char json[200];
+  snprintf(json, sizeof(json), "{\"busy\":%s,\"status\":\"%s\"}",
+           gh_busy ? "true" : "false", gh_status);
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+  httpd_resp_sendstr(req, json);
+  return ESP_OK;
+}
+
 static esp_err_t handle_update_page(httpd_req_t* req) {
   httpd_resp_set_type(req, "text/html");
   httpd_resp_send(req, kUpdatePage, HTTPD_RESP_USE_STRLEN);
@@ -231,6 +357,12 @@ inline void add_firmware_update_handlers() {
   auto log = std::make_shared<HTTPRequestHandler>(1 << HTTP_GET, "/api/halmet-log",
                                                   logcap::handle_log_get);
   server->add_handler(log);
+  auto gh_post = std::make_shared<HTTPRequestHandler>(
+      1 << HTTP_POST, "/api/firmware/github", handle_github_post);
+  auto gh_get = std::make_shared<HTTPRequestHandler>(
+      1 << HTTP_GET, "/api/firmware/github", handle_github_get);
+  server->add_handler(gh_post);
+  server->add_handler(gh_get);
 }
 
 }  // namespace halmet

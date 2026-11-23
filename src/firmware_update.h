@@ -65,6 +65,7 @@ code{background:#eee;padding:.1em .3em;border-radius:3px}ol{padding-left:1.3em}l
 </style>
 <h2>HALMET Wind — firmware update</h2>
 <p>Running <b id="v">…</b> <span class="m" id="b"></span></p>
+<p><a href="/wind">Open the wind dashboard</a></p>
 <p><button id="chk">Check latest release</button> <span id="rel"></span></p>
 <p><button id="gh">Install latest from GitHub</button> <span id="ghs" class="m">the board downloads it itself; needs internet on the boat Wi-Fi</span></p>
 <p><a href="/api/halmet-log" download="halmet-wind-log.txt"><button type="button">Download log</button></a> <span class="m">start-up plus the latest lines</span></p>

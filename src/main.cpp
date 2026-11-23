@@ -42,6 +42,7 @@
 #include "seatalk.h"                  // SeaTalk 1 RX decode + TX
 #include "sensesp/ui/ui_controls.h"   // CheckboxConfig
 #include "wind_cal.h"                 // sin/cos auto-calibration
+#include "wind_dashboard.h"           // phone dashboard at /wind
 
 using namespace sensesp;
 using namespace halmet;
@@ -267,6 +268,8 @@ void setup() {
   add_help_cards();
   // Browser OTA: /update page, /api/firmware GET (info) and POST (flash).
   add_firmware_update_handlers();
+  winddash::add_wind_dashboard([]() { return last_awa_rad; },
+                               []() { return last_aws_mps; });
 
   // ----- I2C + ADS1115 -----
   // GAIN_ONE = ±4.096 V FS at the ADS pin. Masthead sin/cos swing ~2.5-5.5 V

@@ -39,7 +39,7 @@ static constexpr uint32_t kClearHoldMs = 5000;
 
 // Terminal-voltage bands from the MOB handover. Calibrate against the real
 // loop; anything between bands is treated as a fault.
-static constexpr float kOpenAbove = 3.0f;
+static constexpr float kOpenAbove = 2.95f;  // the current source tops out ~3.0 V
 static constexpr float kNormalMin = 2.0f, kNormalMax = 2.9f;
 static constexpr float kDegradedMin = 1.4f;  // up to kNormalMin
 static constexpr float kPressedMin = 0.6f;   // up to kDegradedMin

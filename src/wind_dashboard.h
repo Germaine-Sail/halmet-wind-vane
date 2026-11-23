@@ -2,6 +2,7 @@
 
 // Phone wind dashboard served by the board: http://halmet-wind.local/wind
 //
+//   Numbers  just the angle and the speed, as large as the screen allows
 //   Dial  boat-up instrument face, port/starboard close-hauled sectors,
 //         apparent wind angle and speed in large type
 //   Rose  where the apparent wind has come from over the last 10 minutes,
@@ -70,12 +71,20 @@ line-height:1;letter-spacing:-.02em}
 .read span{font-size:15px;color:var(--soft)}
 #side.p{color:var(--port)}#side.s{color:var(--stbd)}
 nav{display:flex;gap:8px;margin-top:auto;padding-bottom:12px}
-nav button{flex:1;font:inherit;font-size:16px;font-weight:600;color:var(--ink);
+nav button{flex:1;font:inherit;font-size:15px;font-weight:600;color:var(--ink);
 background:var(--face);border:0;border-radius:14px;padding:12px 0}
 nav button[aria-pressed=true]{background:var(--ink);color:var(--face)}
 nav button:focus-visible{outline:3px solid var(--fly);outline-offset:2px}
 #note{font-size:14px;color:var(--soft);text-align:center;min-height:20px;margin:0}
 .stale .read b,.stale #fly{opacity:.25}
+body.big #face,body.big #note{display:none}
+body.big .read{grid-template-columns:1fr;flex:1;margin:12px 0}
+body.big .read div{display:flex;flex-direction:column;justify-content:center;
+align-items:center;padding:4px 8px}
+body.big .read b{font-size:min(30vh,34vw)}
+body.big .read span{font-size:20px}
+@media (orientation:landscape){body.big .read{grid-template-columns:1fr 1fr}
+body.big .read b{font-size:min(50vh,22vw)}}
 </style></head><body>
 <svg id="face" viewBox="0 0 400 400" aria-label="Apparent wind"></svg>
 <p id="note"></p>
@@ -86,6 +95,7 @@ nav button:focus-visible{outline:3px solid var(--fly);outline-offset:2px}
 <nav>
  <button id="vDial" aria-pressed="true">Dial</button>
  <button id="vRose" aria-pressed="false">Rose</button>
+ <button id="vBig" aria-pressed="false">Numbers</button>
  <button id="bUnit">m/s</button>
  <button id="bNight">Night</button>
 </nav>
@@ -145,7 +155,8 @@ function drawRose(){
  const mins=Math.round(tot/60);
  $('note').textContent=tot?`Last ${mins<1?'minute':mins+' minutes'}, darker petals mean stronger wind`:
  'No wind readings yet';}
-function draw(){st.view==='rose'?drawRose():(drawDial(),$('note').textContent='');}
+function draw(){document.body.classList.toggle('big',st.view==='big');
+ if(st.view==='rose')drawRose();else if(st.view==='dial'){drawDial();$('note').textContent='';}}
 function show(){
  const stale=Date.now()-last>4000;document.body.classList.toggle('stale',stale);
  if(awa==null){$('awa').textContent='--';$('side').textContent='Angle';$('side').className='';}
@@ -165,9 +176,11 @@ async function pollHist(){
  setTimeout(pollHist,5000);}
 function setView(v){st.view=localStorage.view=v;
  $('vDial').setAttribute('aria-pressed',v==='dial');$('vRose').setAttribute('aria-pressed',v==='rose');
+ $('vBig').setAttribute('aria-pressed',v==='big');
  draw();if(v==='rose'){hist=null;fetch('/api/wind/history',{cache:'no-store'}).then(r=>r.json())
  .then(j=>{hist=j;drawRose();}).catch(()=>{});}}
 $('vDial').onclick=()=>setView('dial');$('vRose').onclick=()=>setView('rose');
+$('vBig').onclick=()=>setView('big');
 $('bUnit').onclick=()=>{st.kn=!st.kn;localStorage.unit=st.kn?'kn':'ms';show();};
 $('bNight').onclick=()=>{st.night=!st.night;localStorage.night=st.night?'1':'0';
  document.body.classList.toggle('night',st.night);$('bNight').textContent=st.night?'Day':'Night';};
